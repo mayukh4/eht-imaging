@@ -52,20 +52,34 @@ class Array(object):
                          Space antennas have x=y=z=0 in the tarr
     """
 
-    def __init__(self, tarr, ephem={}):
+    def __init__(self, tarr, ephem={}, traj={}):
         self.tarr = tarr
         self.ephem = ephem
+        self.traj = traj
 
-        # check to see if ephemeris is correct
+        # check to see if ephemeris is correct and/or if balloon trajectory is correct
         for line in self.tarr:
-            if np.any(np.isnan([line['x'], line['y'], line['z']])):
+            if np.all(np.array([line['x'], line['y'], line['z']]) == 0):
                 sitename = str(line['site'])
                 try:
                     elen = len(ephem[sitename])
-                except NameError:
+                except (KeyError, NameError):
                     raise Exception('no ephemeris for site %s !' % sitename)
                 if elen != 3:
                     raise Exception('wrong ephemeris format for site %s !' % sitename)
+            if np.all(np.array([line['x'], line['y'], line['z']]) == -1):
+                sitename = str(line['site'])
+                try:
+                    traj_entry = traj[sitename]
+                    # Handle both old format (array) and new format (dict)
+                    if isinstance(traj_entry, dict):
+                        trajlen = len(traj_entry['data'])
+                    else:
+                        trajlen = len(traj_entry)
+                except (KeyError, NameError):
+                    raise Exception('no trajectory for site %s !' % sitename)
+                if trajlen != 4:
+                    raise Exception('wrong trajectory format for site %s !' % sitename)
 
         # Dictionary of array indices for site names
         self.tkey = {self.tarr[i]['site']: i for i in range(len(self.tarr))}
@@ -111,7 +125,8 @@ class Array(object):
 
     def obsdata(self, ra, dec, rf, bw, tint, tadv, tstart, tstop,
                 mjd=ehc.MJD_DEFAULT, timetype='UTC', polrep='stokes',
-                elevmin=ehc.ELEV_LOW, elevmax=ehc.ELEV_HIGH,
+                elevmin=ehc.ELEV_LOW, elevmin_bal=ehc.ELEV_LOW_BAL,
+                elevmax=ehc.ELEV_HIGH, elevmax_bal=ehc.ELEV_HIGH_BAL,
                 no_elevcut_space=False,
                 tau=ehc.TAUDEF, fix_theta_GMST=False):
         """Generate u,v points and baseline uncertainties.
@@ -141,7 +156,8 @@ class Array(object):
         obsarr = simobs.make_uvpoints(self, ra, dec, rf, bw,
                                       tint, tadv, tstart, tstop,
                                       mjd=mjd, polrep=polrep, tau=tau,
-                                      elevmin=elevmin, elevmax=elevmax, 
+                                      elevmin=elevmin, elevmin_bal=elevmin_bal,
+                                      elevmax=elevmax, elevmax_bal=elevmax_bal,
                                       no_elevcut_space=no_elevcut_space,
                                       timetype=timetype, fix_theta_GMST=fix_theta_GMST)
 
@@ -165,7 +181,7 @@ class Array(object):
         """
         all_sites = [t[0] for t in self.tarr]
         mask = np.array([t in sites for t in all_sites])
-        subarr = Array(self.tarr[mask], ephem=self.ephem)
+        subarr = Array(self.tarr[mask], ephem=self.ephem, traj=self.traj)
         return subarr
 
     def save_txt(self, fname):
@@ -232,9 +248,9 @@ class Array(object):
                                  float(fr_par), float(fr_elev), float(fr_off)), dtype=ehc.DTARR)
         tarr_new = np.append(tarr_old, tarr_newline)
         
-        arr_out = Array(tarr_new, ephem_old)
+        arr_out = Array(tarr_new, ephem_old, traj=self.traj)
         return arr_out
-            
+
     def remove_site(self, site):
         """Remove a site from the array
            
@@ -243,35 +259,39 @@ class Array(object):
         ephem_old = self.ephem.copy()
         ephem_new = ephem_old.copy()
         
+        traj_new = self.traj.copy()
+
         try:
             tarr_new = np.delete(tarr_old.copy(), self.tkey[site])
             if site in ephem_old.keys():
-                ephem_new.pop(site) 
+                ephem_new.pop(site)
+            if site in traj_new.keys():
+                traj_new.pop(site)
         except:
             raise Exception("could not find site %s to delete from Array!"%site)
-        
-        arr_out = Array(tarr_new, ephem_new)
+
+        arr_out = Array(tarr_new, ephem_new, traj=traj_new)
         return arr_out
 
     def add_satellite_tle(self, tlelist, sefd=10000):
     
         """Add an earth-orbiting satellite to the array from a TLE
         
-           Args: 
-             tlearr (str) : 3 element list with [name, tle line 1, tle line 2] as strings
+           Args:
+             tlelist (list) : 3 element list with [name, tle line 1, tle line 2] as strings
              sefd (float) : assumed sefd for the array file (assumes sefdl = sefdr)     
         """
-        satname = tlearr[0]
+        satname = tlelist[0]
         tarr_new = self.tarr.copy()
         ephem_new = self.ephem.copy()
-        
+
         tarr_newline = np.array((str(satname), 0., 0., 0.,
-                                 float(sefd), float(sefd), 
+                                 float(sefd), float(sefd),
                                  0., 0., 0., 0., 0.), dtype=ehc.DTARR)
         tarr_new = np.append(tarr_new, tarr_newline)
-        ephem_new[satname] = tlearr
-        arr_out = Array(tarr_new, ephem_new)
-        
+        ephem_new[satname] = tlelist
+        arr_out = Array(tarr_new, ephem_new, traj=self.traj)
+
         return arr_out
 
     def add_satellite_elements(self, satname, 
@@ -297,7 +317,7 @@ class Array(object):
         tarr_new = np.append(tarr_new, tarr_newline)
         
         ephem_new[satname] = [perigee_mjd, period_days, eccentricity, inclination, arg_perigee, long_ascending]
-        arr_out = Array(tarr_new, ephem_new)
+        arr_out = Array(tarr_new, ephem_new, traj=self.traj)
                 
         return arr_out
         

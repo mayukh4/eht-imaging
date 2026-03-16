@@ -36,10 +36,12 @@ except ImportError:
 
 import astropy.time as at
 import astropy.coordinates as coords
+import astropy.units as astro_u
 import numpy as np
 import itertools as it
 import scipy.ndimage as nd
 import scipy.spatial.distance
+from scipy.interpolate import interp1d
 import copy
 import sys
 
@@ -54,8 +56,10 @@ warnings.filterwarnings("ignore", message="divide by zero encountered in double_
 
 
 def compute_uv_coordinates(array, site1, site2, time, mjd, ra, dec, rf, timetype='UTC',
-                           elevmin=ehc.ELEV_LOW,  elevmax=ehc.ELEV_HIGH, no_elevcut_space=False,
-                           fix_theta_GMST=False, earthshadow_space=True):
+                           elevmin=ehc.ELEV_LOW, elevmin_bal=ehc.ELEV_LOW_BAL,
+                           elevmax=ehc.ELEV_HIGH, elevmax_bal=ehc.ELEV_HIGH_BAL,
+                           no_elevcut_space=False, fix_theta_GMST=False,
+                           earthshadow_space=True):
                            
     """Compute u,v coordinates for an array at a given time for a source at a given ra,dec,rf
     """
@@ -118,14 +122,42 @@ def compute_uv_coordinates(array, site1, site2, time, mjd, ra, dec, rf, timetype
     satdict = {satname: sat_skyfield_from_ephementry(satname, array.ephem, mjd) for satname in satnames}
     for satname in satnames:
         sat = satdict[satname]
+        mask1 = (site1==satname)
+        if np.sum(mask1) != 0:
+            c1 = orbit_skyfield(sat, fracmjd[mask1], whichout='itrs')
+            coord1[mask1] = c1.T
+        mask2 = (site2==satname)
+        if np.sum(mask2) != 0:
+            c2 = orbit_skyfield(sat, fracmjd[mask2], whichout='itrs')
+            coord2[mask2] = c2.T
 
-        mask1 = (site1==satname)    
-        c1 = orbit_skyfield(sat, fracmjd[mask1], whichout='itrs')          
-        coord1[mask1] = c1.T
-        mask2 = (site2==satname)    
-        c2 = orbit_skyfield(sat, fracmjd[mask2], whichout='itrs')
-        coord2[mask2] = c2.T
-         
+    # Balloons
+    balloonmask1 = [np.all(coord == (-1., -1., -1.)) for coord in coord1]
+    balloonmask2 = [np.all(coord == (-1., -1., -1.)) for coord in coord2]
+
+    balloonnames = array.traj.keys()
+
+    for balloon in balloonnames:
+        traj_info = array.traj[balloon]
+
+        # Handle both old format (just array) and new format (dict with data and delay)
+        if isinstance(traj_info, dict):
+            bal_data = traj_info['data']
+            delay_hours = traj_info.get('delay_hours', 0.0)
+        else:
+            # Backwards compatibility: traj_info is just the numpy array
+            bal_data = traj_info
+            delay_hours = 0.0
+
+        mask1 = (site1 == balloon)
+        if np.sum(mask1) != 0:
+            c1 = traj_xyz(time, bal_data, delay_hours=delay_hours)
+            coord1[mask1] = c1.T
+        mask2 = (site2 == balloon)
+        if np.sum(mask2) != 0:
+            c2 = traj_xyz(time, bal_data, delay_hours=delay_hours)
+            coord2[mask2] = c2.T
+
     # Satellites: old method
     """
     if np.any(spacemask1):
@@ -197,11 +229,15 @@ def compute_uv_coordinates(array, site1, site2, time, mjd, ra, dec, rf, timetype
     v = np.dot((coord1 - coord2)/wvl, projV)  # v (lambda)
 
     # mask out below elevation cut
-    mask_elev_1 = elevcut(coord1, sourcevec, elevmin=elevmin, elevmax=elevmax) 
+    mask_elev_1 = elevcut(coord1, sourcevec, elevmin=elevmin, elevmax=elevmax)
     mask_elev_2 = elevcut(coord2, sourcevec, elevmin=elevmin, elevmax=elevmax)
-    
+
+    # apply overrides for balloons
+    mask_elev_1[balloonmask1] = elevcut(coord1[balloonmask1], sourcevec, elevmin=elevmin_bal, elevmax=elevmax_bal)
+    mask_elev_2[balloonmask2] = elevcut(coord2[balloonmask2], sourcevec, elevmin=elevmin_bal, elevmax=elevmax_bal)
+
     # do NOT apply elevation cut for space orbiters
-    if no_elevcut_space:    
+    if no_elevcut_space:
         mask_elev_1[spacemask1] = 1
         mask_elev_2[spacemask2] = 1
     
@@ -1774,7 +1810,7 @@ def sat_skyfield_from_ephementry(satname, ephem, epoch_mjd):
         sat = sat_skyfield_from_elements(satname, epoch_mjd,
                                          elements[0],elements[1],elements[2],elements[3],elements[4],elements[5])
     else:
-        raise Exception("ephemeris format not recognized for %s"%satellite)    
+        raise Exception("ephemeris format not recognized for %s" % satname)
 
     return sat
                                                                          
@@ -1804,7 +1840,74 @@ def orbit_skyfield(sat, fracmjds, whichout='itrs'):
         positions = geographic_position.itrs_xyz.m
 
     else:
-        raise Excption("orbit_skyfield whichout must be 'itrs' or 'gcrs'")
+        raise Exception("orbit_skyfield whichout must be 'itrs' or 'gcrs'")
         
-    return positions        
+    return positions
 
+
+def traj_xyz(time, balloon, delay_hours=0.0):
+    """Interpolate balloon trajectory to get ECEF coordinates at given observation times.
+
+       Args:
+           time (ndarray): observation times in hours from simulation start
+           balloon (ndarray): trajectory array (4, N) = [time_seconds, lat, lon, alt]
+           delay_hours (float): hours after simulation start when balloon launches (default 0).
+                                If delay_hours=24, balloon enters simulation at hour 24 at trajectory t=0.
+
+       Returns:
+           positions (ndarray): (3, len(time)) ECEF coordinates in meters.
+                                NaN values for times before launch (will cause baseline exclusion).
+    """
+
+    # Apply launch delay - balloon's trajectory time starts when it launches
+    # effective_time is the time along the trajectory, not simulation time
+    effective_time = time - delay_hours
+
+    # Create mask for times before this balloon has launched
+    before_launch_mask = effective_time < 0
+
+    # Trajectory timing
+    traj_time_h = (balloon[0] - balloon[0][0]) / 3600  # trajectory time in hours from trajectory start
+    max_traj_hours = traj_time_h[-1]
+
+    # Clamp effective time to valid range for interpolation
+    # (negative times will be masked out later)
+    effective_time_clamped = np.maximum(effective_time, 0)
+
+    # Check if observation exceeds trajectory length (after accounting for delay)
+    beyond_trajectory_mask = effective_time_clamped > max_traj_hours
+
+    if np.any(beyond_trajectory_mask & ~before_launch_mask):
+        stationary_count = np.sum(beyond_trajectory_mask & ~before_launch_mask)
+        max_excess = np.max(effective_time_clamped[beyond_trajectory_mask & ~before_launch_mask]) - max_traj_hours
+        warnings.warn("Balloon stationary for %.2f hours (%d timestamps beyond trajectory)"
+                       % (max_excess, stationary_count))
+
+    # Create interpolators with fill_value for out-of-bounds (stationary at end)
+    interp_lat = interp1d(traj_time_h, balloon[1], kind='linear',
+                          bounds_error=False, fill_value=(balloon[1][0], balloon[1][-1]))
+    interp_lon = interp1d(traj_time_h, balloon[2], kind='linear',
+                          bounds_error=False, fill_value=(balloon[2][0], balloon[2][-1]))
+    interp_alt = interp1d(traj_time_h, balloon[3], kind='linear',
+                          bounds_error=False, fill_value=(balloon[3][0], balloon[3][-1]))
+
+    # Interpolate positions
+    lat = interp_lat(effective_time_clamped)
+    lon = interp_lon(effective_time_clamped)
+    alt = interp_alt(effective_time_clamped)
+
+    # Convert to ECEF coordinates
+    loc = coords.EarthLocation(lat=lat*astro_u.degree, lon=lon*astro_u.degree, height=alt*astro_u.meter)
+    x = loc.x.value
+    y = loc.y.value
+    z = loc.z.value
+
+    positions = np.array([x, y, z])
+
+    # Set pre-launch positions to NaN
+    # This causes elevation calculations to return NaN, which fails the elevation cut
+    # Result: baselines involving this balloon before its launch time are excluded
+    if np.any(before_launch_mask):
+        positions[:, before_launch_mask] = np.nan
+
+    return positions

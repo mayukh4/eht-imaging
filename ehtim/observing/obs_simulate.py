@@ -45,7 +45,8 @@ import ehtim.const_def as ehc
 def make_uvpoints(array, ra, dec, rf, bw, tint, tadv, tstart, tstop,
                   polrep='stokes',
                   mjd=ehc.MJD_DEFAULT, tau=ehc.TAUDEF,
-                  elevmin=ehc.ELEV_LOW, elevmax=ehc.ELEV_HIGH,
+                  elevmin=ehc.ELEV_LOW, elevmin_bal=ehc.ELEV_LOW_BAL,
+                  elevmax=ehc.ELEV_HIGH, elevmax_bal=ehc.ELEV_HIGH_BAL,
                   no_elevcut_space=False,
                   timetype='UTC', fix_theta_GMST=False):
     """Generate u,v points and baseline sigmas for a given array.
@@ -122,6 +123,11 @@ def make_uvpoints(array, ra, dec, rf, bw, tint, tadv, tstart, tstop,
                     tau1 = 0.
                 if coord2 == (0., 0., 0.):
                     tau2 = 0.
+                # no optical depth for balloon sites
+                if coord1 == (-1., -1., -1.):
+                    tau1 = 0.
+                if coord2 == (-1., -1., -1.):
+                    tau2 = 0.
 
                 # Noise on the correlations
                 if np.any(array.tarr['sefdr'] <= 0) or np.any(array.tarr['sefdl'] <= 0):
@@ -146,7 +152,8 @@ def make_uvpoints(array, ra, dec, rf, bw, tint, tadv, tstart, tstop,
 
                 uvdat = obsh.compute_uv_coordinates(array, site1, site2, times, mjd,
                                                     ra, dec, rf, timetype=timetype,
-                                                    elevmin=elevmin, elevmax=elevmax,
+                                                    elevmin=elevmin, elevmin_bal=elevmin_bal,
+                                                    elevmax=elevmax, elevmax_bal=elevmax_bal,
                                                     no_elevcut_space=no_elevcut_space,
                                                     fix_theta_GMST=fix_theta_GMST)
 

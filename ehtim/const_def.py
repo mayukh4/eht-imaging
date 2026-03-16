@@ -62,6 +62,10 @@ BOUNDS_ERROR = True  # When False, movie will return NEAREST NEIGHBOR frames
 ELEV_LOW = 10.0
 ELEV_HIGH = 85.0
 
+# Balloon telescope elevation cuts (degrees)
+ELEV_LOW_BAL = 10.0
+ELEV_HIGH_BAL = 60.0
+
 TAUDEF = 0.1  # Default Optical Depth
 GAINPDEF = 0.1  # Default rms of gain errors
 DTERMPDEF = 0.05  # Default rms of D-term errors

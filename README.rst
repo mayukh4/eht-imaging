@@ -39,6 +39,44 @@ Alternatively, first install NFFT manually following the instructions on the `re
 
 **Certain eht-imaging functions require other external packages that are not automatically installed.** In addition to pynfft, these include  `networkx <https://networkx.github.io/>`_ (for image comparison functions), `requests <http://docs.python-requests.org/en/master/>`_ (for dynamical imaging), and `scikit-image <https://scikit-image.org/>`_ (for a few image analysis functions). However, the vast majority of the code will work without these dependencies.
 
+**For balloon and satellite VLBI simulations**, `skyfield <https://rhodesmill.org/skyfield/>`_ and `sgp4 <https://pypi.org/project/sgp4/>`_ are required for orbit propagation. Both are installable via pip:
+
+.. code-block:: bash
+
+    pip install skyfield sgp4
+
+Balloon and Satellite Support
+-----------------------------
+
+eht-imaging supports simulating observations with moving VLBI platforms in addition to the existing space VLBI support.
+
+**Balloon stations** use ``(-1, -1, -1)`` placeholder coordinates in the telescope array. During observation generation, positions are interpolated from a trajectory file (NumPy array of shape ``(4, N)`` = ``[time_s, lat_deg, lon_deg, alt_m]``). Separate elevation limits (``elevmin_bal``, ``elevmax_bal``) can be set for balloon platforms. Atmospheric opacity is bypassed for balloons.
+
+**Satellite stations** use ``(0, 0, 0)`` placeholder coordinates (unchanged from existing behavior). A null-check guard has been added for robustness when satellite baselines are absent, and typos in ``orbit_skyfield`` and ``sat_skyfield_from_ephementry`` have been fixed.
+
+The ``Array`` class now accepts an optional ``traj`` parameter (dict mapping station names to trajectory arrays), which is preserved through ``make_subarray``, ``add_site``, ``remove_site``, and ``add_satellite_tle``/``add_satellite_elements``.
+
+Quick example:
+
+.. code-block:: python
+
+    import numpy as np
+    import ehtim as eh
+
+    # Load array and add a balloon station
+    arr = eh.array.load_txt('arrays/EHT2017.txt')
+    traj = np.load('trajectory.npy')  # shape (4, N)
+
+    # Add balloon with placeholder coords (-1, -1, -1)
+    balloon_entry = ('BVEX', -1., -1., -1., 42000., 42000., 0.+0.j, 0.+0.j, 1., 0., 0.)
+    tarr = np.append(arr.tarr, np.array([balloon_entry], dtype=eh.const_def.DTARR))
+    arr_new = eh.array.Array(tarr, traj={'BVEX': traj})
+
+    # Generate observation (balloon positions interpolated automatically)
+    obs = arr_new.obsdata(ra, dec, rf, bw, tint, tadv, tstart, tstop)
+
+All changes are backward compatible: ``Array(tarr)`` and ``Array(tarr, ephem={})`` continue to work without a ``traj`` argument.
+
 Documentation and Tutorials
 ---------------------------
 Documentation is  `here <https://achael.github.io/eht-imaging>`_.
